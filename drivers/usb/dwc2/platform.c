@@ -356,7 +356,8 @@ static void dwc2_driver_shutdown(struct platform_device *dev)
 {
 	struct dwc2_hsotg *hsotg = platform_get_drvdata(dev);
 
-	disable_irq(hsotg->irq);
+	dwc2_disable_global_interrupts(hsotg);
+	synchronize_irq(hsotg->irq);
 }
 
 /**
@@ -454,12 +455,12 @@ static int dwc2_driver_probe(struct platform_device *dev)
 		retval = PTR_ERR(hsotg->vbus_supply);
 		hsotg->vbus_supply = NULL;
 		if (retval != -ENODEV)
-			return retval;
+			goto error_wakeirq;
 	}
 
 	retval = dwc2_lowlevel_hw_enable(hsotg);
 	if (retval)
-		return retval;
+		goto error_wakeirq;
 
 	hsotg->needs_byte_swap = dwc2_check_core_endianness(hsotg);
 
@@ -562,16 +563,31 @@ static int dwc2_driver_probe(struct platform_device *dev)
 	if (hsotg->dr_mode == USB_DR_MODE_PERIPHERAL)
 		dwc2_lowlevel_hw_disable(hsotg);
 
+#if IS_ENABLED(CONFIG_USB_DWC2_PERIPHERAL) || \
+	IS_ENABLED(CONFIG_USB_DWC2_DUAL_ROLE)
+	/* Postponed adding a new gadget to the udc class driver list */
+	if (hsotg->gadget_enabled) {
+		retval = usb_add_gadget_udc(hsotg->dev, &hsotg->gadget);
+		if (retval) {
+			hsotg->gadget.udc = NULL;
+			dwc2_hsotg_remove(hsotg);
+			goto error;
+		}
+	}
+#endif /* CONFIG_USB_DWC2_PERIPHERAL || CONFIG_USB_DWC2_DUAL_ROLE */
 	return 0;
 
 error_init:
 	if (hsotg->params.activate_stm_id_vb_detection)
 		regulator_disable(hsotg->usb33d);
 error:
+	if (hsotg->dr_mode != USB_DR_MODE_PERIPHERAL)
+		dwc2_lowlevel_hw_disable(hsotg);
+
+error_wakeirq:
 	if (hsotg->wakeirq > 0)
 		dev_pm_clear_wake_irq(&dev->dev);
 
-	dwc2_lowlevel_hw_disable(hsotg);
 	return retval;
 }
 
